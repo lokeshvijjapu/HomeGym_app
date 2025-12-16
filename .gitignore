@@ -73,3 +73,13 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+# Firebase secrets (DO NOT COMMIT)
+android/app/google-services.json
+
+# Local database files
+*.db
+gym_history.db
+
+# Python cache
+__pycache__/
+*.pyc
