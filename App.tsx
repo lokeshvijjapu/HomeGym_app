@@ -1,5 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import { saveWorkoutToFirestore } from './src/firestoreHistory';
+// import HistoryScreen from './src/screens/HistoryScreen';
 
 import {
   SafeAreaView,
@@ -16,14 +17,19 @@ import {
   Alert,
   Linking,
   TextInput,
+  Button,
+  RefreshControl,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
 import {BleManager, Device, Characteristic, State} from 'react-native-ble-plx';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import {Buffer} from 'buffer';
-import {postWorkout, fetchHistory} from './api';
+import {postWorkout} from './api';
+import { fetchWorkoutHistory } from './src/firestoreHistory';
 import auth from '@react-native-firebase/auth';
+// external History screen (not used; internal HistoryScreen is defined below)
+import HistoryScreenExternal from './src/screens/HistoryScreen';
 
 const manager = new BleManager();
 
@@ -213,7 +219,7 @@ function LocalLoginScreen({navigation}: LoginProps) {
     <SafeAreaView style={styles.containerFlex}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <View style={styles.loginHeader}>
-          <Text style={styles.appTitleLarge}>💪 Neonflake Gym</Text>
+          <Text style={styles.appTitleLarge}> HealthWaale </Text>
           <Text style={styles.appSubtitleLarge}>Smart Home Gym Controller</Text>
           <Text style={styles.appDescriptionText}>Track your strength. Achieve your goals.</Text>
         </View>
@@ -262,7 +268,7 @@ function HomeScreen({navigation, route}: HomeProps) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [scanning, setScanning] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
-
+  const [showHistory, setShowHistory] = useState(false);
   useEffect(() => {
     const checkBtState = async () => {
       const state = await manager.state();
@@ -280,6 +286,10 @@ function HomeScreen({navigation, route}: HomeProps) {
 
     checkBtState();
   }, []);
+
+  if (showHistory) {
+    return <HistoryScreen navigation={navigation} route={{ params: { userEmail } }} onClose={() => setShowHistory(false)} />;
+  }
 
   const startScan = async () => {
     const permOk = await ensureBlePermissions();
@@ -349,12 +359,12 @@ function HomeScreen({navigation, route}: HomeProps) {
       <View style={styles.homeHeader}>
         <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}}>
           <View>
-            <Text style={styles.appTitleLarge}>💪 Neonflake Gym</Text>
+            <Text style={styles.appTitleLarge}> HealthWaale </Text>
             <Text style={styles.appSubtitleSmall}>Your Personal Home Gym</Text>
           </View>
-          <TouchableOpacity onPress={() => navigation.navigate('History', {userEmail})} style={{padding: 8}}>
-            <Text style={{color: '#0ea5e9', fontWeight: '800'}}>History</Text>
-          </TouchableOpacity>
+          <View style={{padding: 8}}>
+            <Button title="View History" color="#0ea5e9" onPress={() => setShowHistory(true)} />
+          </View>
         </View>
       </View>
 
@@ -746,6 +756,7 @@ function ActiveWorkoutScreen({route, navigation}: ActiveWorkoutProps) {
   const [isActive, setIsActive] = useState(true);
   const [setComplete, setSetComplete] = useState(false);
   const [showCompletionModal, setShowCompletionModal] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!isActive || setComplete) return;
@@ -776,34 +787,33 @@ function ActiveWorkoutScreen({route, navigation}: ActiveWorkoutProps) {
     }
   };
 
-  const handleFinishSet = () => {
+  const handleFinishSet = async () => {
+    if (saving) return;
+    setSaving(true);
+
     setIsActive(false);
     setSetComplete(true);
     setShowCompletionModal(true);
-  
-  const payload = {
-    user_id: userEmail,
-    device_id: deviceId,
-    exercise: exerciseName,
-    weight,
-    target_reps: targetReps,
-    actual_reps: currentReps,
-    target_time: targetTime,
-    actual_time: targetTime - timeRemaining,
-  };
 
-  // 🔥 SAVE TO FIRESTORE (PRIMARY)
-  saveWorkoutToFirestore(payload);
+    const payload = {
+      user_id: userEmail,
+      device_id: deviceId,
+      exercise: exerciseName,
+      weight,
+      target_reps: targetReps,
+      actual_reps: currentReps,
+      target_time: targetTime,
+      actual_time: targetTime - timeRemaining,
+    };
 
-  // 🔁 KEEP BACKEND SAVE (OPTIONAL / EXISTING)
-  (async () => {
     try {
-      await postWorkout(payload);
-      console.log('Workout posted to backend');
-    } catch (e) {
-      console.warn('Failed to post workout', e);
+      await saveWorkoutToFirestore(payload);
+    } finally {
+      setSaving(false);
     }
-  })();
+
+    // Optional backend post (disabled to avoid duplicate saves)
+    // postWorkout(payload).catch(e => console.warn('Backend post failed', e));
   };
 
   const repProgress = (currentReps / targetReps) * 100;
@@ -1134,18 +1144,20 @@ export default function App() {
 
 /* ----------------- History Screen ----------------- */
 
-function HistoryScreen({ navigation, route }: HistoryProps) {
-  const {userEmail} = route.params;
+function HistoryScreen(props: any) {
+  const { navigation, route, onClose } = props;
+  const {userEmail} = route?.params || {};
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
       console.log('Loading history for:', userEmail);
-      const res = await fetchHistory(userEmail);
+      const res = await fetchWorkoutHistory();
       console.log('Got response:', res);
       setItems(res || []);
     } catch (e) {
@@ -1164,22 +1176,54 @@ function HistoryScreen({ navigation, route }: HistoryProps) {
     return unsub;
   }, [navigation]);
 
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  };
+
   const renderItem = ({ item }: { item: any }) => (
-    <View style={{padding: 12, marginBottom: 10, borderRadius: 12, backgroundColor: '#1a1f2e', borderWidth:1.5, borderColor:'#2a3142'}}>
-      <Text style={{color:'#cbd5e1', fontWeight:'700', fontSize:16}}>{item.exercise}</Text>
-      <Text style={{color:'#94a3b8', fontSize:12, marginTop:6}}>{new Date(item.timestamp).toLocaleString()}</Text>
-      <View style={{flexDirection:'row', justifyContent:'space-between', marginTop:8}}>
-        <Text style={{color:'#0ea5e9', fontWeight:'800'}}>{item.actual_reps} / {item.target_reps} reps</Text>
-        <Text style={{color:'#10b981', fontWeight:'800'}}>{item.weight} kg</Text>
+    <View style={styles.historyCard}>
+      <View style={{flex: 1}}>
+        <Text style={styles.historyTitle}>{item.exercise}</Text>
+        {
+          (() => {
+            const ts = item.createdAt || item.timestamp || item.created_at;
+            let dateStr = '';
+            if (!ts) {
+              dateStr = '—';
+            } else if (ts.toDate && typeof ts.toDate === 'function') {
+              dateStr = ts.toDate().toLocaleString();
+            } else if (typeof ts === 'number') {
+              dateStr = new Date(ts).toLocaleString();
+            } else {
+              try {
+                dateStr = new Date(ts).toLocaleString();
+              } catch (e) {
+                dateStr = String(ts);
+              }
+            }
+            return <Text style={styles.historyDate}>{dateStr}</Text>;
+          })()
+        }
+      </View>
+      <View style={{alignItems: 'flex-end'}}>
+        <Text style={styles.historyReps}>{item.actual_reps} / {item.target_reps}</Text>
+        <Text style={styles.historyWeight}>{item.weight} kg</Text>
       </View>
     </View>
   );
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.workoutHeader}>
-        <Text style={styles.appTitleLarge}>📜 History</Text>
-        <Text style={styles.appSubtitleSmall}>Recent workouts</Text>
+      <View style={styles.workoutHeaderRow}>
+        <TouchableOpacity onPress={() => (onClose ? onClose() : navigation.goBack())} style={{paddingRight: 12}}>
+          <Text style={{color: '#94a3b8', fontSize: 20}}>←</Text>
+        </TouchableOpacity>
+        <View style={{flex: 1}}>
+          <Text style={styles.appTitleLarge}>📜 History</Text>
+          <Text style={styles.appSubtitleSmall}>Recent workouts</Text>
+        </View>
       </View>
 
       {loading ? (
@@ -1197,11 +1241,28 @@ function HistoryScreen({ navigation, route }: HistoryProps) {
         </View>
       ) : (
         <FlatList
+          style={{flex: 1}}
           data={items}
           keyExtractor={(i) => String(i.id)}
           renderItem={renderItem}
-          contentContainerStyle={{padding: 16}}
-          ListEmptyComponent={<View style={{alignItems:'center', paddingTop:40}}><Text style={{color:'#94a3b8'}}>No history yet.</Text></View>}
+          contentContainerStyle={{padding: 16, paddingBottom: 28}}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor="#0ea5e9"
+              colors={["#0ea5e9"]}
+            />
+          }
+          ListEmptyComponent={
+            <View style={{alignItems:'center', paddingTop:40}}>
+              <Text style={{fontSize:36}}>📭</Text>
+              <Text style={{color:'#94a3b8', marginTop:12}}>No history yet.</Text>
+              <TouchableOpacity onPress={() => navigation.navigate('Home', {userEmail})} style={{marginTop:12, paddingHorizontal:16, paddingVertical:10, backgroundColor:'#0ea5e9', borderRadius:10}}>
+                <Text style={{color:'#ffffff', fontWeight:'800'}}>Start Workout</Text>
+              </TouchableOpacity>
+            </View>
+          }
         />
       )}
     </SafeAreaView>
@@ -1275,6 +1336,42 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 20,
     marginBottom: 8,
+  },
+
+  /* History */
+  historyCard: {
+    padding: 14,
+    marginBottom: 14,
+    borderRadius: 14,
+    backgroundColor: '#0f1720',
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 4},
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  historyTitle: {
+    color: '#ffffff',
+    fontWeight: '900',
+    fontSize: 18,
+    marginBottom: 6,
+  },
+  historyDate: {
+    color: '#94a3b8',
+    fontSize: 11,
+  },
+  historyReps: {
+    color: '#0ea5e9',
+    fontWeight: '800',
+  },
+  historyWeight: {
+    color: '#10b981',
+    fontWeight: '800',
+    marginTop: 6,
   },
 
   /* ===== Login Screen ===== */
@@ -1549,6 +1646,12 @@ const styles = StyleSheet.create({
   /* ===== Workout Screen ===== */
   workoutHeader: {
     paddingVertical: 20,
+    paddingBottom: 8,
+  },
+  workoutHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
     paddingBottom: 8,
   },
 

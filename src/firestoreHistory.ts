@@ -1,33 +1,56 @@
 import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
 
-export const saveWorkoutToFirestore = async (workout: any) => {
-  console.log('🔥 saveWorkoutToFirestore CALLED');
-  console.log('Workout payload:', workout);
+export type Workout = {
+  id: string;
+  exercise: string;
+  weight: number;
+  target_reps: number;
+  actual_reps: number;
+  target_time: number;
+  actual_time: number;
+  device_id: string;
+  createdAt?: any;
+};
 
+export async function fetchWorkoutHistory(): Promise<Workout[]> {
   const user = auth().currentUser;
-  console.log('Current user:', user);
 
   if (!user) {
-    console.warn('❌ No user logged in, Firestore save skipped');
-    return;
+    console.warn('No user logged in');
+    return [];
   }
-
-  const uid = user.uid;
-  console.log('Saving workout for UID:', uid);
 
   try {
-    const ref = await firestore()
+    const snapshot = await firestore()
       .collection('users')
-      .doc(uid)
+      .doc(user.uid)
       .collection('workouts')
-      .add({
-        ...workout,
-        createdAt: firestore.FieldValue.serverTimestamp(),
-      });
+      .orderBy('createdAt', 'desc')
+      .get();
 
-    console.log('✅ Workout saved with ID:', ref.id);
+    return snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...(doc.data() as any),
+    }));
   } catch (e) {
-    console.error('❌ Firestore save error:', e);
+    console.error('Failed to fetch workout history', e);
+    return [];
   }
-};
+}
+
+export async function saveWorkoutToFirestore(workout: any) {
+  const user = auth().currentUser;
+  if (!user) return;
+
+  const uid = user.uid;
+
+  await firestore()
+    .collection('users')
+    .doc(uid)
+    .collection('workouts')
+    .add({
+      ...workout,
+      createdAt: firestore.FieldValue.serverTimestamp(),
+    });
+}
