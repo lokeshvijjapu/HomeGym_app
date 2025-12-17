@@ -1,3 +1,75 @@
+Neonflake Gym — Smart Home Gym Controller
+
+Welcome! This README is written for beginners. It explains how to run the app, connect it to Firebase, and test BLE scanning. If anything is unclear, tell me which part you want expanded and I will update it.
+
+## What this app does (simple)
+- Discover nearby BLE gym devices.
+- Let you configure a workout (weight, reps, time).
+- Run an active set with a timer and rep counter.
+- Save your workouts to Firebase Firestore and view them in a History screen.
+
+## Quick start (for absolute beginners)
+
+1) Install Node.js (LTS) from https://nodejs.org/
+2) Open a terminal (PowerShell on Windows) and go to the project folder. For example:
+
+```powershell
+cd D:\Neonflake\ble_app\blescan
+```
+
+3) Install packages (run once):
+
+```powershell
+# using npm
+npm install
+
+# or using yarn
+# yarn
+```
+
+4) Start the Metro dev server and run the app on Android (keep Metro running):
+
+```powershell
+npx react-native start --reset-cache
+# In a new terminal window:
+npx react-native run-android
+```
+
+If you see build errors, read them — missing Android SDK or Pod install issues are common for beginners. Tell me the error and I can help.
+
+## Firebase (required to save history)
+
+1. Go to https://console.firebase.google.com and create a project.
+2. In the Firebase console enable **Authentication → Email/Password**.
+3. Create a **Firestore** database (start in test mode while developing).
+4. Download `google-services.json` (Android) from the Firebase console and copy it into `android/app/`.
+5. For iOS (macOS only), follow Firebase's iOS setup and add `GoogleService-Info.plist` to the Xcode project and run `pod install` in `ios/`.
+
+## App usage (basic)
+1. Open the app on your phone or emulator.
+2. Log in with an email and password (the app will create an account if it does not exist).
+3. From Home tap **START WORKOUT** to scan for nearby devices. Grant permissions when prompted.
+4. Select your device from the list, choose an exercise, set weight/reps/time, and `START SET`.
+5. When a set finishes tap **FINISH SET** — the workout will be saved to Firestore.
+6. From Home tap **View History** to see saved workouts.
+
+## Common beginner problems and fixes
+- "No devices found" — Make sure Bluetooth is enabled and the device is near. On Android also allow Location permission if prompted.
+- "Permissions required" — Android may ask for runtime permissions; accept them or open app settings.
+- "saveWorkoutToFirestore is not a function" — Make sure `src/firestoreHistory.ts` exports `saveWorkoutToFirestore` and imports use: `import { saveWorkoutToFirestore } from './src/firestoreHistory';`.
+- "Can't build for iOS" — Ensure CocoaPods are installed and run `cd ios && bundle exec pod install`.
+
+## File map (where to look)
+- `App.tsx` — main app and all screens; a good place to start reading code.
+- `src/firestoreHistory.ts` — helper functions that read/write Firestore.
+- `api.ts` — optional backend integration (posts workout data to a server).
+
+## If you get stuck
+1. Copy the error message you see in the terminal or the red error screen and paste it in chat here.
+2. I will tell you the exact command or file change to fix it.
+
+Want me to add screenshots or a short screencast of logging in and viewing history? Reply and I will add them to this README.
+
 This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
 
 # Getting Started
