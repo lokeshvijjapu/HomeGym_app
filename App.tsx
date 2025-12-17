@@ -1,4 +1,6 @@
 import React, {useEffect, useState} from 'react';
+import { saveWorkoutToFirestore } from './src/firestoreHistory';
+
 import {
   SafeAreaView,
   View,
@@ -277,20 +279,6 @@ function HomeScreen({navigation, route}: HomeProps) {
     };
 
     checkBtState();
-
-    const sub = manager.onStateChange(newState => {
-      if (newState === State.PoweredOff) {
-        Alert.alert(
-          'Bluetooth turned off',
-          'Turn it on again to connect to devices.',
-        );
-      }
-    }, true);
-
-    return () => {
-      sub.remove();
-      manager.stopDeviceScan();
-    };
   }, []);
 
   const startScan = async () => {
@@ -312,6 +300,7 @@ function HomeScreen({navigation, route}: HomeProps) {
     setModalVisible(true);
 
     manager.startDeviceScan(null, null, (error, device) => {
+      console.log('BLE SCAN', error, device?.name);
       if (error) {
         console.log('Scan error', error);
         setScanning(false);
@@ -791,26 +780,30 @@ function ActiveWorkoutScreen({route, navigation}: ActiveWorkoutProps) {
     setIsActive(false);
     setSetComplete(true);
     setShowCompletionModal(true);
-    
-    // Post to backend in background
-    (async () => {
-      try {
-        const payload = {
-          user_id: userEmail,
-          device_id: deviceId,
-          exercise: exerciseName,
-          weight,
-          target_reps: targetReps,
-          actual_reps: currentReps,
-          target_time: targetTime,
-          actual_time: targetTime - timeRemaining,
-        };
-        await postWorkout(payload);
-        console.log('Workout posted to backend');
-      } catch (e) {
-        console.warn('Failed to post workout', e);
-      }
-    })();
+  
+  const payload = {
+    user_id: userEmail,
+    device_id: deviceId,
+    exercise: exerciseName,
+    weight,
+    target_reps: targetReps,
+    actual_reps: currentReps,
+    target_time: targetTime,
+    actual_time: targetTime - timeRemaining,
+  };
+
+  // 🔥 SAVE TO FIRESTORE (PRIMARY)
+  saveWorkoutToFirestore(payload);
+
+  // 🔁 KEEP BACKEND SAVE (OPTIONAL / EXISTING)
+  (async () => {
+    try {
+      await postWorkout(payload);
+      console.log('Workout posted to backend');
+    } catch (e) {
+      console.warn('Failed to post workout', e);
+    }
+  })();
   };
 
   const repProgress = (currentReps / targetReps) * 100;
