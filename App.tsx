@@ -30,6 +30,7 @@ import { fetchWorkoutHistory } from './src/firestoreHistory';
 import auth from '@react-native-firebase/auth';
 // external History screen (not used; internal HistoryScreen is defined below)
 import HistoryScreenExternal from './src/screens/HistoryScreen';
+import SignUpScreen from './src/screens/SignUpScreen';
 
 const manager = new BleManager();
 
@@ -254,6 +255,13 @@ function LocalLoginScreen({navigation}: LoginProps) {
             onPress={onLogin}
             activeOpacity={0.85}>
             <Text style={styles.buttonPrimaryText}>LOGIN</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={{marginTop:12, alignItems:'center'}}
+            onPress={() => navigation.navigate('SignUp')}
+            activeOpacity={0.7}>
+            <Text style={{color:'#cbd5e1', fontWeight:'600'}}>Create an account</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -1130,6 +1138,7 @@ function PermissionGate() {
 
   return <Stack.Navigator initialRouteName="Login" screenOptions={{headerShown: false}}>
     <Stack.Screen name="Login" component={LocalLoginScreen} />
+    <Stack.Screen name="SignUp" component={SignUpScreen} />
     <Stack.Screen name="Home" component={HomeScreen} />
     <Stack.Screen name="History" component={HistoryScreen} />
     <Stack.Screen name="Device" component={DeviceScreen} />
