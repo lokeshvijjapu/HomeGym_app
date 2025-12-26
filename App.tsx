@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import { saveWorkoutToFirestore } from './src/firestoreHistory';
 // import HistoryScreen from './src/screens/HistoryScreen';
 
@@ -451,62 +451,395 @@ const EXERCISES = [
 
 function DeviceScreen({route, navigation}: DeviceProps) {
   const {device, userEmail} = route.params;
-  const [status, setStatus] = useState<'Connecting' | 'Connected' | 'Failed'>(
+  const [status, setStatus] = useState<'Connecting' | 'Connected' | 'Failed' | 'Disconnected'>(
     'Connecting',
   );
   const [bleChar, setBleChar] = useState<Characteristic | null>(null);
+  const [incomingMessages, setIncomingMessages] = useState<string[]>([]);
+  const monitorSubRef = useRef<any>(null);
+  const pendingMessagesRef = useRef<string[]>([]);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const messageCountRef = useRef<number>(0);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectingRef = useRef(false);
+  const disconnectionSubRef = useRef<any>(null);
+  const isNavigatingAwayRef = useRef(false);
+  const MAX_RECONNECT_ATTEMPTS = 5;
 
   useEffect(() => {
+    let isUnmounted = false;
+
+    const clearMonitor = () => {
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      pendingMessagesRef.current = [];
+      if (monitorSubRef.current && typeof monitorSubRef.current.remove === 'function') {
+        try {
+          monitorSubRef.current.remove();
+        } catch (e) {
+          console.log('Error removing monitor', e);
+        }
+      }
+      monitorSubRef.current = null;
+    };
+
+    const handleDisconnection = () => {
+      if (isUnmounted) {
+        return;
+      }
+      console.log('Device disconnected - scheduling reconnect...');
+      clearMonitor();
+      setStatus('Disconnected');
+      setBleChar(null);
+      reconnectAttemptsRef.current += 1;
+      const delay = Math.min(1000 * reconnectAttemptsRef.current, 5000);
+
+      if (disconnectionSubRef.current && typeof disconnectionSubRef.current.remove === 'function') {
+        try {
+          disconnectionSubRef.current.remove();
+        } catch (e) {
+          console.log('Error removing disconnection listener', e);
+        }
+        disconnectionSubRef.current = null;
+      }
+
+      if (!isNavigatingAwayRef.current) {
+        setTimeout(() => {
+          if (!isUnmounted && !isNavigatingAwayRef.current) {
+            connect();
+          }
+        }, delay);
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (isUnmounted || connectingRef.current) {
+        return;
+      }
+      
+      // Don't limit reconnect attempts - keep trying to maintain connection
+      // Only stop if navigating away
+      if (isNavigatingAwayRef.current) {
+        return;
+      }
+
+      reconnectAttemptsRef.current += 1;
+      const delay = Math.min(1000 * reconnectAttemptsRef.current, 5000); // Faster reconnection
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+      reconnectTimerRef.current = setTimeout(() => {
+        if (!isUnmounted && !isNavigatingAwayRef.current) {
+          reconnectTimerRef.current = null;
+          connect();
+        }
+      }, delay);
+    };
+
     const connect = async () => {
+      if (connectingRef.current || isUnmounted || isNavigatingAwayRef.current) {
+        return;
+      }
+      connectingRef.current = true;
       setStatus('Connecting');
+      
       try {
+        // Cancel any existing connection first
+        // Only cancel if we are actually connected; avoids unnecessary pair prompts
+        try {
+          const isConnected = await manager.isDeviceConnected(device.id);
+          if (isConnected) {
+            await manager.cancelDeviceConnection(device.id);
+          }
+        } catch (e) {
+          // Ignore errors when checking/canceling
+        }
+
         const connected = await manager.connectToDevice(device.id, {
-          autoConnect: false,
+          autoConnect: true, // Enable auto-connect to avoid pair button prompts
+          requestMTU: 185,
         });
+        // Ask for high priority to keep link stable while streaming
+        try {
+          await connected.requestConnectionPriority('high');
+        } catch (e) {
+          console.log('requestConnectionPriority failed (non-critical)', e);
+        }
+
+        // Set up disconnection listener
+        if (disconnectionSubRef.current) {
+          try {
+            disconnectionSubRef.current.remove();
+          } catch (e) {}
+        }
+
+        disconnectionSubRef.current = manager.onDeviceDisconnected(device.id, (error, device) => {
+          console.log('Disconnection event', error?.message || 'Device disconnected');
+          handleDisconnection();
+        });
+
         await connected.discoverAllServicesAndCharacteristics();
 
         const services = await connected.services();
-        const service = services.find(
-          s =>
-            s.uuid.toLowerCase() ===
-            '12345678-1234-1234-1234-1234567890ab',
+
+        // Service UUIDs your Pi advertises (single known service)
+        const supportedServiceUuids = ['12340000-0000-1000-8000-00805f9b34fb'];
+
+        const service = services.find(s =>
+          supportedServiceUuids.includes(s.uuid.toLowerCase()),
         );
+
         if (!service) {
           setStatus('Failed');
+          if (!isUnmounted && !isNavigatingAwayRef.current) {
+            scheduleReconnect();
+          }
           return;
         }
 
         const chars = await connected.characteristicsForService(service.uuid);
-        const char = chars.find(
-          c =>
-            c.uuid.toLowerCase() ===
-            'abcdefab-1234-5678-1234-abcdefabcdef',
+
+        // Write characteristic for your Pi
+        const writeCandidateUuids = ['12340001-0000-1000-8000-00805f9b34fb'];
+
+        const writeChar = chars.find(c =>
+          writeCandidateUuids.includes(c.uuid.toLowerCase()),
         );
-        if (!char) {
+
+        if (!writeChar) {
           setStatus('Failed');
+          if (!isUnmounted && !isNavigatingAwayRef.current) {
+            scheduleReconnect();
+          }
           return;
         }
 
-        setBleChar(char);
+        // Optional notify characteristic
+        const notifyUuid = '12340002-0000-1000-8000-00805f9b34fb';
+        const notifyChar = chars.find(c => c.uuid.toLowerCase() === notifyUuid);
+
+        if (isUnmounted || isNavigatingAwayRef.current) {
+          return;
+        }
+
+        setBleChar(writeChar);
         setStatus('Connected');
-      } catch (e) {
+        reconnectAttemptsRef.current = 0;
+        messageCountRef.current = 0;
+
+        if (notifyChar) {
+          clearMonitor();
+
+          try {
+            // Start monitoring - react-native-ble-plx automatically enables notifications
+            // The key is to keep the subscription active and handle errors gracefully
+            monitorSubRef.current = manager.monitorCharacteristicForDevice(
+              device.id,
+              service.uuid,
+              notifyChar.uuid,
+              (error, characteristic) => {
+                // Process messages even during navigation to prevent data loss
+                
+                if (error) {
+                  const errorMsg = String(error?.message || error);
+                  console.log(`[${messageCountRef.current}] Notify error:`, errorMsg);
+                  // Do NOT trigger reconnect from monitor errors; only log.
+                  // Actual disconnects are handled by onDeviceDisconnected.
+                  return;
+                }
+                
+                // Process incoming messages - no throttling to match NRF Connect behavior
+                if (!characteristic || !characteristic.value) {
+                  return;
+                }
+                
+                try {
+                  const raw = characteristic.value;
+                  if (raw && raw.trim()) {
+                    try {
+                      const decoded = Buffer.from(raw, 'base64').toString();
+                      if (decoded && decoded.trim()) {
+                        messageCountRef.current += 1;
+                        
+                        // Add to buffer immediately - no throttling
+                        pendingMessagesRef.current.push(decoded);
+                        
+                        // Log every 50 messages for debugging
+                        if (messageCountRef.current % 50 === 0) {
+                          console.log(`Received ${messageCountRef.current} messages so far`);
+                        }
+                        
+                        // Flush buffer frequently to prevent overflow
+                        if (!flushTimerRef.current) {
+                          flushTimerRef.current = setTimeout(() => {
+                            flushTimerRef.current = null;
+                            
+                            const pendingCount = pendingMessagesRef.current.length;
+                            if (pendingCount === 0) {
+                              return;
+                            }
+                            
+                            // Process all pending messages in batch
+                            const messagesToAdd = pendingMessagesRef.current.splice(0, pendingCount);
+                            
+                            // Update state - use functional update to avoid race conditions
+                            setIncomingMessages(prev => {
+                              const merged = [...prev, ...messagesToAdd];
+                              // Keep last 500 messages to avoid memory issues while preserving data
+                              const maxMessages = 500;
+                              return merged.length > maxMessages 
+                                ? merged.slice(-maxMessages)
+                                : merged;
+                            });
+                          }, 33); // Flush every ~33ms (30fps) for smooth updates
+                        }
+                      }
+                    } catch (decodeError) {
+                      // Decode errors are non-critical - continue processing
+                      console.log(`Decode error at message ${messageCountRef.current}:`, decodeError);
+                    }
+                  }
+                } catch (e) {
+                  // Any processing error is non-critical - don't stop monitoring
+                  console.log(`Processing error at message ${messageCountRef.current}:`, e);
+                }
+              },
+            );
+            
+            console.log('✅ Notification monitoring started - ready to receive messages');
+          } catch (monitorError) {
+            console.error('❌ Monitor setup failed:', monitorError);
+            // Retry monitor setup after a short delay
+            if (!isUnmounted && !isNavigatingAwayRef.current) {
+              setTimeout(() => {
+                if (!isUnmounted && !isNavigatingAwayRef.current && status === 'Connected') {
+                  console.log('Retrying monitor setup...');
+                  // Re-run the monitor setup by calling connect again
+                  connect();
+                }
+              }, 1000);
+            }
+          }
+        } else {
+          console.log('⚠️ No notify characteristic found - messages will not be received');
+        }
+      } catch (e: any) {
         console.log('Connect error', e);
-        setStatus('Failed');
+        if (!isUnmounted && !isNavigatingAwayRef.current) {
+          setStatus('Failed');
+          // Only reconnect on certain errors, not all
+          if (e.message && !e.message.includes('already connected')) {
+            scheduleReconnect();
+          }
+        }
+      } finally {
+        connectingRef.current = false;
       }
     };
+
+    // Listen for navigation events - only stop reconnecting when actually leaving the screen
+    const unsubscribeFocus = navigation.addListener('blur', () => {
+      // Don't set to true on blur - keep connection alive when navigating to workout screens
+      // Only stop when component unmounts
+    });
+
+    const unsubscribeFocusBack = navigation.addListener('focus', () => {
+      // Ensure we're connected when coming back to this screen
+      if (status !== 'Connected' && !connectingRef.current) {
+        connect();
+      }
+    });
 
     connect();
 
     return () => {
-      manager.cancelDeviceConnection(device.id).catch(() => {});
+      isUnmounted = true;
+      isNavigatingAwayRef.current = true; // Only set to true on actual unmount
+      clearMonitor();
+      
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      
+      if (disconnectionSubRef.current) {
+        try {
+          disconnectionSubRef.current.remove();
+        } catch (e) {
+          console.log('Error removing disconnection listener', e);
+        }
+        disconnectionSubRef.current = null;
+      }
+      
+      unsubscribeFocus();
+      unsubscribeFocusBack();
+      
+      // Only cancel connection when actually leaving the screen (not just navigating to workout)
+      // Don't cancel on blur - keep connection alive
     };
-  }, [device.id]);
+  }, [device.id, navigation]);
+
+  // Auto-reconnect when status becomes Disconnected
+  useEffect(() => {
+    if (status === 'Disconnected' && !connectingRef.current && !isNavigatingAwayRef.current) {
+      console.log('Status is Disconnected - triggering reconnect');
+      reconnectAttemptsRef.current = 0;
+      const reconnect = async () => {
+        if (connectingRef.current) return;
+        connectingRef.current = true;
+        setStatus('Connecting');
+        try {
+          await manager.cancelDeviceConnection(device.id);
+        } catch (e) {}
+        try {
+          const connected = await manager.connectToDevice(device.id, {
+            autoConnect: true,
+            requestMTU: 23,
+          });
+          await connected.discoverAllServicesAndCharacteristics();
+          const services = await connected.services();
+          const service = services.find(s => 
+            s.uuid.toLowerCase() === '12340000-0000-1000-8000-00805f9b34fb'
+          );
+          if (service) {
+            const chars = await connected.characteristicsForService(service.uuid);
+            const writeChar = chars.find(c => 
+              c.uuid.toLowerCase() === '12340001-0000-1000-8000-00805f9b34fb'
+            );
+            if (writeChar) {
+              setBleChar(writeChar);
+              setStatus('Connected');
+              reconnectAttemptsRef.current = 0;
+            } else {
+              setStatus('Failed');
+            }
+          } else {
+            setStatus('Failed');
+          }
+        } catch (e) {
+          setStatus('Failed');
+        } finally {
+          connectingRef.current = false;
+        }
+      };
+      setTimeout(reconnect, 1000);
+    }
+  }, [status, device.id]);
 
   const selectExercise = async (exerciseId: string, exerciseName: string) => {
-    if (!bleChar) {
-      Alert.alert('Not connected', 'Wait for device to connect.');
+    // Wait for connection if not connected yet
+    if (status !== 'Connected' || !bleChar) {
+      Alert.alert(
+        'Connecting...', 
+        'Please wait for the device to connect. It will connect automatically.',
+        [{text: 'OK', style: 'cancel'}]
+      );
       return;
     }
+    
     try {
       const payload = `EXERCISE:${exerciseId.toUpperCase()}`;
       await manager.writeCharacteristicWithResponseForDevice(
@@ -525,65 +858,119 @@ function DeviceScreen({route, navigation}: DeviceProps) {
         characteristicUuid: bleChar.uuid,
         userEmail,
       });
-    } catch (e) {
+    } catch (e: any) {
       console.log('Write exercise error', e);
+      const errorMsg = e?.message || 'Unknown error';
+      if (errorMsg.includes('disconnected') || errorMsg.includes('not connected')) {
+        // Connection will auto-reconnect, just inform user
+        Alert.alert(
+          'Connection lost', 
+          'Device disconnected. Reconnecting automatically...',
+          [{text: 'OK'}]
+        );
+        // Trigger reconnection by setting status and letting useEffect handle it
+        setStatus('Disconnected');
+        setBleChar(null);
+      } else {
+        Alert.alert('Connection issue', 'Could not send command. Please try again.');
+      }
     }
   };
 
+
   const statusColor =
-    status === 'Connected' ? '#10b981' : status === 'Failed' ? '#ef4444' : '#f59e0b';
-  const statusIcon = status === 'Connected' ? '✓' : status === 'Failed' ? '✕' : '⟳';
+    status === 'Connected' ? '#10b981' 
+    : status === 'Failed' ? '#ef4444' 
+    : status === 'Disconnected' ? '#f59e0b'
+    : '#f59e0b';
+  const statusIcon = 
+    status === 'Connected' ? '✓' 
+    : status === 'Failed' ? '✕' 
+    : status === 'Disconnected' ? '⚠'
+    : '⟳';
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.deviceHeader}>
-        <Text style={styles.appTitleLarge}>⚙️ {device.name || 'Device'}</Text>
-        <Text style={styles.appSubtitleSmall}>{device.id}</Text>
-      </View>
+    <SafeAreaView style={styles.containerFlex}>
+      <ScrollView
+        contentContainerStyle={{paddingHorizontal: 16, paddingBottom: 24}}
+        showsVerticalScrollIndicator={false}>
+        <View style={styles.deviceHeader}>
+          <Text style={styles.appTitleLarge}>⚙️ {device.name || 'Device'}</Text>
+          <Text style={styles.appSubtitleSmall}>{device.id}</Text>
+        </View>
 
-      <View style={styles.connectionCard}>
-        <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 8}}>
-          <View
-            style={[
-              styles.statusIndicator,
-              {backgroundColor: statusColor},
-            ]}
-          />
-          <Text style={styles.connectionLabel}>Connection Status</Text>
-          <Text style={[styles.statusBadge, {borderColor: statusColor}]}>
-            {statusIcon} {status}
+        <View style={styles.connectionCard}>
+          <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 8}}>
+            <View
+              style={[
+                styles.statusIndicator,
+                {backgroundColor: statusColor},
+              ]}
+            />
+            <Text style={styles.connectionLabel}>Connection Status</Text>
+            <Text style={[styles.statusBadge, {borderColor: statusColor}]}>
+              {statusIcon} {status}
+            </Text>
+          </View>
+          <Text style={styles.connectionHint}>
+            {status === 'Connected' 
+              ? 'Device connected successfully. Receiving data...' 
+              : status === 'Connecting'
+              ? 'Establishing connection...'
+              : status === 'Disconnected'
+              ? 'Device disconnected. Reconnecting automatically...'
+              : 'Connection failed. Retrying...'}
           </Text>
         </View>
-        <Text style={styles.connectionHint}>
-          {status === 'Connected' 
-            ? 'Device connected successfully' 
-            : status === 'Connecting'
-            ? 'Establishing connection...'
-            : 'Connection failed'}
-        </Text>
-      </View>
 
-      <Text style={styles.sectionTitleLarge}>Choose Your Exercise</Text>
+        <Text style={styles.sectionTitleLarge}>Choose Your Exercise</Text>
 
-      <View style={{marginTop: 12}}>
-        {EXERCISES.map((ex, idx) => (
-          <TouchableOpacity
-            key={ex.id}
-            style={[
-              styles.exerciseButton,
-              idx === EXERCISES.length - 1 && {marginBottom: 0},
-            ]}
-            onPress={() => selectExercise(ex.id, ex.name)}
-            disabled={status !== 'Connected'}
-            activeOpacity={0.8}>
-            <View style={{flex: 1}}>
-              <Text style={styles.exerciseName}>{ex.name}</Text>
-              <Text style={styles.exerciseHint}>Tap to start workout</Text>
-            </View>
-            <Text style={styles.exerciseArrow}>→</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+        <View style={{marginTop: 12}}>
+          {EXERCISES.map((ex, idx) => (
+            <TouchableOpacity
+              key={ex.id}
+              style={[
+                styles.exerciseButton,
+                idx === EXERCISES.length - 1 && {marginBottom: 0},
+              ]}
+              onPress={() => selectExercise(ex.id, ex.name)}
+              activeOpacity={0.8}>
+              <View style={{flex: 1}}>
+                <Text style={styles.exerciseName}>{ex.name}</Text>
+                <Text style={styles.exerciseHint}>Tap to start workout</Text>
+              </View>
+              <Text style={styles.exerciseArrow}>→</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.incomingCard}>
+          <View style={styles.incomingHeader}>
+            <Text style={styles.incomingTitle}>Device messages</Text>
+            <Text style={styles.incomingCount}>
+              {incomingMessages.length ? `${incomingMessages.length} received` : 'Waiting for data...'}
+            </Text>
+          </View>
+          <ScrollView
+            style={{maxHeight: 220}}
+            contentContainerStyle={{gap: 8}}
+            nestedScrollEnabled
+            showsVerticalScrollIndicator={true}>
+            {incomingMessages.length === 0 ? (
+              <Text style={styles.incomingEmpty}>Nothing received yet.</Text>
+            ) : (
+              incomingMessages
+                .slice()
+                .reverse()
+                .map((msg, idx) => (
+                  <View key={`${idx}-${msg.slice(0, 8)}`} style={styles.incomingItem}>
+                    <Text style={styles.incomingItemText}>{msg}</Text>
+                  </View>
+                ))
+            )}
+          </ScrollView>
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -627,9 +1014,20 @@ function WorkoutScreen({route, navigation}: WorkoutProps) {
         characteristicUuid,
         userEmail,
       });
-    } catch (e) {
+    } catch (e: any) {
       console.log('Write workout error', e);
-      Alert.alert('Error', 'Could not send workout to device.');
+      const errorMsg = e?.message || 'Unknown error';
+      if (errorMsg.includes('disconnected') || errorMsg.includes('not connected')) {
+        Alert.alert(
+          'Device Disconnected',
+          'The device has disconnected. Please go back and reconnect.',
+          [
+            {text: 'OK', onPress: () => navigation.goBack()}
+          ]
+        );
+      } else {
+        Alert.alert('Error', 'Could not send workout to device. Please try again.');
+      }
     }
   };
 
@@ -1622,6 +2020,22 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
 
+  reconnectButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: '#0ea5e9',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: '#0ea5e9',
+  },
+
+  reconnectButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+
   exerciseButton: {
     paddingVertical: 14,
     paddingHorizontal: 14,
@@ -1649,6 +2063,56 @@ const styles = StyleSheet.create({
   exerciseArrow: {
     color: '#0ea5e9',
     fontSize: 18,
+    fontWeight: '600',
+  },
+
+  incomingCard: {
+    backgroundColor: '#1a1f2e',
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    marginTop: 20,
+    borderWidth: 1.5,
+    borderColor: '#2a3142',
+  },
+
+  incomingHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+
+  incomingTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+
+  incomingCount: {
+    color: '#64748b',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  incomingEmpty: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+
+  incomingItem: {
+    backgroundColor: '#0f1419',
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1.2,
+    borderColor: '#2a3142',
+  },
+
+  incomingItemText: {
+    color: '#cbd5e1',
+    fontSize: 13,
     fontWeight: '600',
   },
 
